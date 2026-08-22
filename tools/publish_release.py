@@ -29,7 +29,12 @@ def main() -> int:
     release = root / "releases" / release_id
     station = load_station(args.station)
 
-    write_weekly_release(station, release, now)
+    forecast_files = write_weekly_release(station, release, now)
+    station_id = station["id"].split(":", 1)[1]
+    write_json(
+        release / "forecast" / station["source"].lower() / station_id / "index.json",
+        {"v": 1, "station": station["id"], "generated_at": int(now.timestamp()), "weeks": [path.stem for path in forecast_files]},
+    )
     catalog_station = release / "catalog" / station["source"].lower() / f"{station['id'].split(':', 1)[1]}.json"
     catalog_station.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(args.station, catalog_station)
