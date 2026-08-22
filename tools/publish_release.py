@@ -27,6 +27,19 @@ def main() -> int:
     release_id = now.date().isoformat()
     root = args.root.resolve()
     release = root / "releases" / release_id
+    current_path = root / "current.json"
+    previous_release = None
+    if current_path.exists():
+        previous_release = json.loads(current_path.read_text(encoding="utf-8")).get("release")
+    # A previsão NOAA muda diariamente, mas a parte CHM autorizada é anual.
+    # Carregamos a última cópia imutável para que uma atualização NOAA nunca
+    # apague o catálogo brasileiro do ponteiro current.json.
+    if previous_release and previous_release != release_id:
+        previous = root / "releases" / previous_release
+        for relative in (Path("catalog") / "chm", Path("forecast") / "chm"):
+            source = previous / relative
+            if source.exists():
+                shutil.copytree(source, release / relative, dirs_exist_ok=True)
     station = load_station(args.station)
 
     forecast_files = write_weekly_release(station, release, now)
@@ -43,10 +56,13 @@ def main() -> int:
         key: station[key]
         for key in ("id", "name", "lat_e5", "lon_e5", "source", "datum", "unit", "timezone", "prediction_class", "attribution")
     }
-    write_json(release / "catalog" / "index.json", {"v": 1, "generated_at": int(now.timestamp()), "stations": [station_summary]})
+    catalog_path = release / "catalog" / "index.json"
+    carried = json.loads((root / "releases" / previous_release / "catalog" / "index.json").read_text(encoding="utf-8")) if previous_release and (root / "releases" / previous_release / "catalog" / "index.json").exists() else {"stations": []}
+    stations = [entry for entry in carried.get("stations", []) if entry.get("source") == "CHM"] + [station_summary]
+    write_json(catalog_path, {"v": 1, "generated_at": int(now.timestamp()), "stations": stations})
     write_json(
         release / "release.json",
-        {"v": 1, "release": release_id, "generated_at": int(now.timestamp()), "sources": [station["source"]], "forecast_window_days": WINDOW_DAYS, "min_client_version": 1},
+        {"v": 1, "release": release_id, "generated_at": int(now.timestamp()), "sources": sorted(set([station["source"]] + (["CHM"] if any(entry.get("source") == "CHM" for entry in stations) else []))), "forecast_window_days": WINDOW_DAYS, "min_client_version": 1},
     )
     write_json(root / "current.json", {"v": 1, "release": release_id, "generated_at": int(now.timestamp()), "min_client_version": 1})
     return 0

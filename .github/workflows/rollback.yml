@@ -1,0 +1,39 @@
+name: Restaurar release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Release existente no formato YYYY-MM-DD'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validar release
+        run: test -f "releases/${{ inputs.release }}/release.json"
+      - name: Mover ponteiro atômico
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          python - <<'PY'
+          import json, os, time
+          release = os.environ['RELEASE']
+          with open('current.json', encoding='utf-8') as f:
+              current = json.load(f)
+          current.update({'release': release, 'generated_at': int(time.time())})
+          with open('current.json', 'w', encoding='utf-8') as f:
+              json.dump(current, f, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+          PY
+      - run: |
+          git config user.name 'mares-data bot'
+          git config user.email 'mares-data-bot@users.noreply.github.com'
+          git add current.json
+          git commit -m "Restaura release ${{ inputs.release }}"
+          git push
