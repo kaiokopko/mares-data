@@ -18,7 +18,8 @@ def write_json(path: Path, data: object) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--station", type=Path, required=True)
+    parser.add_argument("--station", type=Path, action="append", required=True,
+                        help="estacao aprovada; pode ser informado mais de uma vez")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--date", help="YYYY-MM-DD UTC; padrao: agora")
     args = parser.parse_args()
@@ -40,29 +41,29 @@ def main() -> int:
             source = previous / relative
             if source.exists():
                 shutil.copytree(source, release / relative, dirs_exist_ok=True)
-    station = load_station(args.station)
-
-    forecast_files = write_weekly_release(station, release, now)
-    station_id = station["id"].split(":", 1)[1]
-    write_json(
-        release / "forecast" / station["source"].lower() / station_id / "index.json",
-        {"v": 1, "station": station["id"], "generated_at": int(now.timestamp()), "weeks": [path.stem for path in forecast_files]},
-    )
-    catalog_station = release / "catalog" / station["source"].lower() / f"{station['id'].split(':', 1)[1]}.json"
-    catalog_station.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(args.station, catalog_station)
-
-    station_summary = {
-        key: station[key]
-        for key in ("id", "name", "lat_e5", "lon_e5", "source", "datum", "unit", "timezone", "prediction_class", "attribution")
-    }
+    stations_to_publish = [load_station(path) for path in args.station]
+    station_summaries = []
+    for station, station_path in zip(stations_to_publish, args.station, strict=True):
+        forecast_files = write_weekly_release(station, release, now)
+        station_id = station["id"].split(":", 1)[1]
+        write_json(
+            release / "forecast" / station["source"].lower() / station_id / "index.json",
+            {"v": 1, "station": station["id"], "generated_at": int(now.timestamp()), "weeks": [path.stem for path in forecast_files]},
+        )
+        catalog_station = release / "catalog" / station["source"].lower() / f"{station_id}.json"
+        catalog_station.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(station_path, catalog_station)
+        station_summaries.append({
+            key: station[key]
+            for key in ("id", "name", "lat_e5", "lon_e5", "source", "datum", "unit", "timezone", "prediction_class", "attribution")
+        })
     catalog_path = release / "catalog" / "index.json"
     carried = json.loads((root / "releases" / previous_release / "catalog" / "index.json").read_text(encoding="utf-8")) if previous_release and (root / "releases" / previous_release / "catalog" / "index.json").exists() else {"stations": []}
-    stations = [entry for entry in carried.get("stations", []) if entry.get("source") == "CHM"] + [station_summary]
+    stations = [entry for entry in carried.get("stations", []) if entry.get("source") == "CHM"] + station_summaries
     write_json(catalog_path, {"v": 1, "generated_at": int(now.timestamp()), "stations": stations})
     write_json(
         release / "release.json",
-        {"v": 1, "release": release_id, "generated_at": int(now.timestamp()), "sources": sorted(set([station["source"]] + (["CHM"] if any(entry.get("source") == "CHM" for entry in stations) else []))), "forecast_window_days": WINDOW_DAYS, "min_client_version": 1},
+        {"v": 1, "release": release_id, "generated_at": int(now.timestamp()), "sources": sorted(set([station["source"] for station in stations_to_publish] + (["CHM"] if any(entry.get("source") == "CHM" for entry in stations) else []))), "forecast_window_days": WINDOW_DAYS, "min_client_version": 1},
     )
     write_json(root / "current.json", {"v": 1, "release": release_id, "generated_at": int(now.timestamp()), "min_client_version": 1})
     return 0
