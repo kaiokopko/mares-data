@@ -8,7 +8,7 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
-from global_data import WINDOW_DAYS, load_station, write_weekly_release
+from global_data import WINDOW_DAYS, load_station, write_rolling_forecast, write_weekly_release
 
 
 def write_json(path: Path, data: object) -> None:
@@ -45,10 +45,18 @@ def main() -> int:
     station_summaries = []
     for station, station_path in zip(stations_to_publish, args.station, strict=True):
         forecast_files = write_weekly_release(station, release, now)
+        rolling_file = write_rolling_forecast(station, release, now)
         station_id = station["id"].split(":", 1)[1]
         write_json(
             release / "forecast" / station["source"].lower() / station_id / "index.json",
-            {"v": 1, "station": station["id"], "generated_at": int(now.timestamp()), "weeks": [path.stem for path in forecast_files]},
+            {
+                "v": 1,
+                "station": station["id"],
+                "generated_at": int(now.timestamp()),
+                "weeks": [path.stem for path in forecast_files],
+                "rolling": rolling_file.name,
+                "window_days": WINDOW_DAYS,
+            },
         )
         catalog_station = release / "catalog" / station["source"].lower() / f"{station_id}.json"
         catalog_station.parent.mkdir(parents=True, exist_ok=True)

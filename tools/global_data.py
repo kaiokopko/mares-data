@@ -19,7 +19,7 @@ import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 FORECAST_VERSION = 1
-WINDOW_DAYS = 42
+WINDOW_DAYS = 30
 MAX_EVENTS_PER_WEEK = 64
 
 
@@ -173,6 +173,26 @@ def write_weekly_release(station: dict[str, Any], output: Path, now: datetime) -
         destination.write_text(json.dumps(chunk, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")
         files.append(destination)
     return files
+
+
+def write_rolling_forecast(station: dict[str, Any], output: Path, now: datetime) -> Path:
+    """Escreve uma unica previsao de 30 dias para o cliente Garmin.
+
+    O relogio guarda somente a estacao ativa. Um documento unico reduz a
+    cadeia de requisicoes Bluetooth para ``current.json`` + ``next-30.json``
+    e continua pequeno o bastante para o Storage do Connect IQ.
+    """
+    station_id = station["id"].split(":", 1)[1]
+    predictions = fetch_noaa_predictions(station_id, now, WINDOW_DAYS)
+    forecast = build_noaa_forecast(station, predictions, now)
+    forecast["window_days"] = WINDOW_DAYS
+    forecast["sha256"] = forecast_hash(forecast)
+    destination = output / "forecast" / station["source"].lower() / station_id / "next-30.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(forecast, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+    return destination
 
 
 def main() -> int:
