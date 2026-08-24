@@ -17,6 +17,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
+      - run: python tools/publish_chm.py
       - run: >-
           python tools/publish_release.py
           --station stations/noaa-1612340.json
