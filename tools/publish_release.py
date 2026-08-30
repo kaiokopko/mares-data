@@ -8,7 +8,7 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
-from global_data import WINDOW_DAYS, load_station, write_rolling_forecast, write_weekly_release
+from global_data import WINDOW_DAYS, fetch_official_forecast, load_station, write_rolling_forecast, write_weekly_release
 
 
 def write_json(path: Path, data: object) -> None:
@@ -44,8 +44,9 @@ def main() -> int:
     stations_to_publish = [load_station(path) for path in args.station]
     station_summaries = []
     for station, station_path in zip(stations_to_publish, args.station, strict=True):
-        forecast_files = write_weekly_release(station, release, now)
-        rolling_file = write_rolling_forecast(station, release, now)
+        forecast = fetch_official_forecast(station, now)
+        forecast_files = write_weekly_release(station, release, now, forecast)
+        rolling_file = write_rolling_forecast(station, release, now, forecast)
         station_id = station["id"].split(":", 1)[1]
         write_json(
             release / "forecast" / station["source"].lower() / station_id / "index.json",
@@ -63,7 +64,8 @@ def main() -> int:
         shutil.copy2(station_path, catalog_station)
         station_summaries.append({
             key: station[key]
-            for key in ("id", "name", "lat_e5", "lon_e5", "source", "datum", "unit", "timezone", "prediction_class", "attribution")
+            for key in ("id", "name", "lat_e5", "lon_e5", "source", "datum", "unit", "timezone", "prediction_class", "attribution", "country", "region", "radius_km", "license_url")
+            if key in station
         })
     catalog_path = release / "catalog" / "index.json"
     carried = json.loads((root / "releases" / previous_release / "catalog" / "index.json").read_text(encoding="utf-8")) if previous_release and (root / "releases" / previous_release / "catalog" / "index.json").exists() else {"stations": []}

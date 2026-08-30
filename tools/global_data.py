@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import xml.etree.ElementTree as ET
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,9 +39,9 @@ def validate_station(station: dict[str, Any]) -> None:
         },
         "estacao",
     )
-    if station["v"] != 1 or not str(station["id"]).startswith(("chm:", "noaa:", "ticon:")):
+    if station["v"] != 1 or not str(station["id"]).startswith(("chm:", "noaa:", "dmi:", "kartverket:", "ticon:")):
         raise ValueError("estacao com versao ou id invalido")
-    if station["source"] not in {"CHM", "NOAA", "TICON"}:
+    if station["source"] not in {"CHM", "NOAA", "DMI", "KARTVERKET", "TICON"}:
         raise ValueError("fonte invalida")
     if station["unit"] != "m":
         raise ValueError("a unidade canonica precisa ser metros")
@@ -106,6 +107,60 @@ def build_noaa_forecast(
     }
 
 
+def _iso_event(moment_text: str, value_cm: float, kind: str, zone: ZoneInfo) -> dict[str, Any]:
+    moment = datetime.fromisoformat(moment_text.replace("Z", "+00:00")).astimezone(UTC)
+    local = moment.astimezone(zone)
+    return {
+        "ts": _epoch(moment),
+        "local": local.strftime("%Y-%m-%d %H:%M"),
+        "offset_s": int(local.utcoffset().total_seconds()),
+        "height_cm": round(value_cm),
+        "kind": kind,
+    }
+
+
+def _official_forecast(station: dict[str, Any], events: list[dict[str, Any]], generated_at: datetime) -> dict[str, Any]:
+    validate_station(station)
+    events.sort(key=lambda event: event["ts"])
+    if len(events) < 2:
+        raise ValueError(f"previsao {station['source']} precisa ter pelo menos dois extremos")
+    if any(event["kind"] not in {"H", "L"} for event in events):
+        raise ValueError(f"tipo de extremo {station['source']} invalido")
+    if any(events[index]["ts"] >= events[index + 1]["ts"] for index in range(len(events) - 1)):
+        raise ValueError(f"eventos {station['source']} precisam estar em ordem UTC estrita")
+    return {
+        "v": FORECAST_VERSION,
+        "station": station["id"],
+        "source": station["source"],
+        "datum": station["datum"],
+        "unit": "m",
+        "prediction_class": "official_extremes",
+        "timezone": station["timezone"],
+        "generated_at": _epoch(generated_at),
+        "valid_from": events[0]["ts"],
+        "valid_to": events[-1]["ts"],
+        "events": events,
+    }
+
+
+def build_dmi_forecast(station: dict[str, Any], predictions: list[dict[str, Any]], generated_at: datetime) -> dict[str, Any]:
+    if station["source"] != "DMI":
+        raise ValueError("esta funcao recebe somente estacao DMI")
+    zone = ZoneInfo(station["timezone"])
+    kinds = {"maximum": "H", "minimum": "L"}
+    events = [_iso_event(raw["predictionTime"], float(raw["value"]), kinds.get(raw["predictionType"], "?"), zone) for raw in predictions]
+    return _official_forecast(station, events, generated_at)
+
+
+def build_kartverket_forecast(station: dict[str, Any], predictions: list[dict[str, Any]], generated_at: datetime) -> dict[str, Any]:
+    if station["source"] != "KARTVERKET":
+        raise ValueError("esta funcao recebe somente estacao Kartverket")
+    zone = ZoneInfo(station["timezone"])
+    kinds = {"high": "H", "low": "L"}
+    events = [_iso_event(raw["time"], float(raw["value_cm"]), kinds.get(raw["flag"], "?"), zone) for raw in predictions]
+    return _official_forecast(station, events, generated_at)
+
+
 def forecast_hash(forecast: dict[str, Any]) -> str:
     encoded = json.dumps(forecast, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -162,10 +217,51 @@ def fetch_noaa_predictions(station_id: str, begin: datetime, days: int = WINDOW_
     return predictions
 
 
-def write_weekly_release(station: dict[str, Any], output: Path, now: datetime) -> list[Path]:
+def fetch_dmi_predictions(station_id: str, begin: datetime, days: int = WINDOW_DAYS) -> list[dict[str, Any]]:
+    end = begin + timedelta(days=days)
+    response = requests.get(
+        "https://opendataapi.dmi.dk/v2/oceanObs/collections/tidewater/items",
+        params={"datetime": f"{begin.astimezone(UTC).isoformat().replace('+00:00', 'Z')}/{end.astimezone(UTC).isoformat().replace('+00:00', 'Z')}", "stationId": station_id, "predictionType": "minimum_maximum", "limit": 1000},
+        timeout=30,
+    )
+    response.raise_for_status()
+    features = response.json().get("features")
+    if not isinstance(features, list):
+        raise ValueError("resposta DMI sem features")
+    return [feature["properties"] for feature in features if isinstance(feature, dict) and isinstance(feature.get("properties"), dict)]
+
+
+def fetch_kartverket_predictions(station_id: str, begin: datetime, days: int = WINDOW_DAYS) -> list[dict[str, Any]]:
+    end = begin + timedelta(days=days)
+    response = requests.get(
+        "https://vannstand.kartverket.no/tideapi.php",
+        params={"tide_request": "stationdata", "stationcode": station_id, "fromtime": begin.astimezone(UTC).strftime("%Y-%m-%dT%H:%M"), "totime": end.astimezone(UTC).strftime("%Y-%m-%dT%H:%M"), "datatype": "tab", "refcode": "cd", "tzone": 0, "dst": 0, "lang": "en"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    errors = [element.text for element in root.findall(".//error") if element.text]
+    if errors:
+        raise ValueError(f"Kartverket recusou previsao: {'; '.join(errors)}")
+    return [{"time": element.attrib["time"], "value_cm": element.attrib["value"], "flag": element.attrib["flag"]} for element in root.findall(".//waterlevel")]
+
+
+def fetch_official_forecast(station: dict[str, Any], now: datetime) -> dict[str, Any]:
     station_id = station["id"].split(":", 1)[1]
-    predictions = fetch_noaa_predictions(station_id, now, WINDOW_DAYS)
-    forecast = build_noaa_forecast(station, predictions, now)
+    if station["source"] == "NOAA":
+        return build_noaa_forecast(station, fetch_noaa_predictions(station_id, now, WINDOW_DAYS), now)
+    if station["source"] == "DMI":
+        return build_dmi_forecast(station, fetch_dmi_predictions(station_id, now, WINDOW_DAYS), now)
+    if station["source"] == "KARTVERKET":
+        return build_kartverket_forecast(station, fetch_kartverket_predictions(station_id, now, WINDOW_DAYS), now)
+    raise ValueError(f"fonte sem adaptador remoto: {station['source']}")
+
+
+def write_weekly_release(
+    station: dict[str, Any], output: Path, now: datetime, forecast: dict[str, Any] | None = None
+) -> list[Path]:
+    station_id = station["id"].split(":", 1)[1]
+    forecast = fetch_official_forecast(station, now) if forecast is None else forecast
     files = []
     for chunk in weekly_chunks(forecast):
         destination = output / "forecast" / station["source"].lower() / station_id / f"{chunk['week_start']}.json"
@@ -175,7 +271,9 @@ def write_weekly_release(station: dict[str, Any], output: Path, now: datetime) -
     return files
 
 
-def write_rolling_forecast(station: dict[str, Any], output: Path, now: datetime) -> Path:
+def write_rolling_forecast(
+    station: dict[str, Any], output: Path, now: datetime, forecast: dict[str, Any] | None = None
+) -> Path:
     """Escreve uma unica previsao de 30 dias para o cliente Garmin.
 
     O relogio guarda somente a estacao ativa. Um documento unico reduz a
@@ -183,8 +281,7 @@ def write_rolling_forecast(station: dict[str, Any], output: Path, now: datetime)
     e continua pequeno o bastante para o Storage do Connect IQ.
     """
     station_id = station["id"].split(":", 1)[1]
-    predictions = fetch_noaa_predictions(station_id, now, WINDOW_DAYS)
-    forecast = build_noaa_forecast(station, predictions, now)
+    forecast = fetch_official_forecast(station, now) if forecast is None else dict(forecast)
     forecast["window_days"] = WINDOW_DAYS
     forecast["sha256"] = forecast_hash(forecast)
     destination = output / "forecast" / station["source"].lower() / station_id / "next-30.json"
