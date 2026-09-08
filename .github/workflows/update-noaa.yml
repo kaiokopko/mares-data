@@ -1,0 +1,39 @@
+name: Atualizar previsões NOAA
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - run: python tools/publish_chm.py
+      - run: >-
+          python tools/publish_release.py
+          --station stations/noaa-1612340.json
+          --station stations/noaa-8454000.json
+          --station stations/noaa-8518750.json
+          --station stations/noaa-8638610.json
+          --station stations/noaa-8720218.json
+          --station stations/noaa-8724580.json
+          --station stations/noaa-8726520.json
+          --station stations/noaa-8771450.json
+          --station stations/noaa-9410230.json
+          --station stations/noaa-9414290.json
+          --station stations/noaa-9443090.json
+      - run: |
+          git config user.name 'mares-data bot'
+          git config user.email 'mares-data-bot@users.noreply.github.com'
+          git add current.json releases
+          git diff --cached --quiet || git commit -m 'Atualiza previsão NOAA'
+          git push
